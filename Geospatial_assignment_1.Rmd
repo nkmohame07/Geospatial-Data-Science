@@ -1,0 +1,457 @@
+---
+title: "Assignment 1: Geospatial Data Science"
+author: "Anastasiia Chernavskaia, Blanca Jimenez, Pablo Fernández, Nour Mohamed"
+date: "01/28/2025"
+output: 
+  prettydoc::html_pretty:
+    theme: hpstr
+    highlight: github
+    white-space: pre-wrap
+ 
+---
+```{r setup, warning=FALSE, message=FALSE, echo=FALSE}
+library(sf)
+library(tidyverse)
+library(ggplot2)
+library(dplyr)
+library(spData)
+library(ggrepel)
+library(geobr)
+library(readxl)
+```
+
+```{r Working environment, warning=FALSE, message=FALSE, echo=FALSE}
+setwd("/Users/nourkhalid/Desktop/Geospatial DS/Assignment 1")
+```
+
+# $\color{darkblue}{\text{Paper 1}}$
+
+Paper: "Irrigation dams, water and infant mortality: Evidence from South Africa".
+
+#### 1. Relevant information of the paper for replicating the map
+
+1. Region: South Africa.
+2. Dams data collected from the "Dam Safety Ofﬁce within the Department of Water Affairs". 
+   -  Only dams of at least 5 m in height and 50,000 cubic meters in capacity are included.
+   -  Sample restricted to dams with "irrigation" uses.
+   -  Dams seem to be located with coordinates as points.
+   -  Data source: http://www.dwaf.gov.za/DSO/Default.aspx
+   -  The data was accessed on August 23, 2013, including all dams listed as of March 2013. 
+   -  About 15 percent of dams were dropped because of missing critical information that could not be veriﬁed (690/4,830). 
+      -  For most missing dams (658/690), the missing information was completion date. 
+      -  Of those dropped, 499 reported a purpose of “irrigation.” 
+   -  The resulting dataset included 4,140 dams, which were restricted to the subset of irrigation dams (3,176). These dams were matched to magisterial districts using their GPS coordinates.
+3. "To construct river gradient, I match river pixels to land gradient data and calculate the fraction of river pixels that are steep, deﬁned as greater than six percent slope, within each district." Data of the Department of Water Affairs.
+    - "As Fig. 2 demonstrates, dams are more likely in areas with gentle to moderate, rather than steep, river gradients."
+    - "In addition, upstream/downstream relationships among districts were coded based on the direction of ﬂow for each river that crossed a district boundary".
+    - Used as the color legend for the map.
+    - The river and land gradient measures are constructed using elevation data from ArcGIS.
+    - Geographic information systems, like ArcGIS, provide elevation data derived from the Shuttle Radar Topography Mission (SRTM). 
+    - The elevation data is provided in a raster (pixel) format.
+    - I use Slope (3D analyst), an ArcGIS tool, to construct the slope at each pixel using the raster elevation data. 
+    - I then use this to construct the average district slope and river gradient slope (the latter is restricted to pixels along the river network provided by the Department of Water Affairs).
+    - Probably, we won't be able to replicate this part - since it uses raster data (and we still haven't seen how to deal with it).
+    - For more information on this, check appendix A.3 of the paper.
+4. Territorial divisions: "magisterial district boundaries that were in place before the end of Apartheid". There were 354 magisterial districts. Data obtained from Global Administrative Boundaries.
+
+Conclusion on the data that we need (for what we *can* replicate with the tools that we have learned until now):
+1. Territorial divisions: "magisterial district boundaries that were in place before the end of Apartheid". Data obtained from Global Administrative Boundaries.
+    - Magisterial districts in 1996: https://agis.nda.agric.za/portal/home/item.html?id=9a47f9828584496bab347a5dd820b154.
+    - Magisterial districts in 2005: https://agis.nda.agric.za/portal/home/item.html?id=f0942201f456496ab94189b50660caf4
+    - Source of the data used below (354 magisterial district boundaries, as in the paper): https://hub.arcgis.com/datasets/nga::land-ownership/about?layer=34.
+2. Dams data which includes dams constructed until March 2013, and only restricted to "irrigation" uses.
+    - Source: AQUASTAT (https://www.fao.org/aquastat/en/databases/dams/). Accessed on the 26th of January 2025. Excel file.
+    - Data available:
+      - Country where the dam is located.
+      - Year of completion of the dam.
+      - Dam height (in meters).
+      - Reservoir capacity (in million cubic meters).
+      - Dam purpose (irrigation included).
+      - Coordinates (latitude + longitude), in decimal degrees.
+    - Further description of the data: https://openknowledge.fao.org/server/api/core/bitstreams/15f369d0-8fb3-4091-bf06-60d40f311348/content
+    
+#### 2. Importing and cleaning the data
+
+We need to read the data from 2 different sources: an Excel (for the dams) and a shape file (for the magisterial district boundaries).
+
+#### 2.1. Dams data
+
+```{r Reading dams data (from Excel), warning=FALSE}
+# We read the sheet containing the dams. We skip 1 row when reading the data
+# (which is just the title of the Excel), and set the column names as defined
+# in the Excel
+df_dams <- read_excel("Africa-dams_eng.xlsx", sheet = "Dams", col_names = TRUE, skip = 1)
+head(df_dams)
+```
+Cleaning that is done in the cells below:
+1. Selection of the variables we're interested in and exclusion of the rest.
+2. Removal of rows with null values in the coordinates.
+3. Filtering of dams which:
+   -  Serve irrigation purposes (marked with an "x" in the dataset).
+   -  Have at least 5m height (though those with missing values will be kept, as there are too many missing values in this column).
+   -  Have at least 50,000 cubic meters of capacity (0.05 million cubic meters).
+   -  Completed at most until 2013.
+   
+```{r Cleaning dams data: feature selection and removal of NAs in coordinates, warning=FALSE}
+# Just keep variables of interest and filter to keep only South African dams
+df_dams_clean <- df_dams %>% 
+  select(`Country`, 
+         `Name of dam`, 
+         `Completed /operational since`, 
+         `Dam height (m)`, 
+         `Reservoir capacity (million m3)`, 
+         `Irrigation`, 
+         `Decimal degree latitude`, 
+         `Decimal degree longitude`) %>%
+  filter(Country == "South Africa")
+
+# Only keep rows where there are no missing values in the coordinates. The ~
+# tells dplyr to treat the expression that follows as a formula, where the 
+# . represents each column being evaluated.
+columns_na <- c("Decimal degree latitude", "Decimal degree longitude")
+df_dams_clean_complete_geo <- df_dams_clean %>%
+  drop_na(columns_na)
+head(df_dams_clean_complete_geo)
+```
+
+Clearly, this dataset is a lot less rich than the one used in the paper: while in the paper they have data of 4,140 dams, of which 3,176 
+were used for irrigation purposes, in this dataset we just have 531 dams for which we have geospatial data (before even filtering further
+the dataset)!
+
+```{r Cleaning dams data: further filtering}
+# Filtering (keeping only) dams with at least 5m height, with minimum 
+# 0.05 million cubic meters of capacity and that serve irrigation purposes
+df_dams_clean_filtered <- df_dams_clean_complete_geo %>%
+  filter(`Dam height (m)` >= 5) %>%
+  filter(`Reservoir capacity (million m3)` >= 0.05) %>%
+  filter(Irrigation == "x") %>%
+  filter(`Completed /operational since` <= 2013)
+
+head(df_dams_clean_filtered)
+```
+
+```{r Creating geospatial features, warning=FALSE}
+# Now, we use the structure as simple feature function for creating the
+# dataset with geospatial features. We just indicate the columns we want
+# to use as geospatial features. Code structure taken from lecture 2.
+sf_dams_1 <- st_as_sf(
+  df_dams_clean_filtered,
+  coords = c("Decimal degree longitude", "Decimal degree latitude"),
+  crs = 'EPSG:4326'
+)
+
+sf_dams_2 <- st_as_sf(
+  df_dams_clean_complete_geo,
+  coords = c("Decimal degree longitude", "Decimal degree latitude"),
+  crs = 'EPSG:4326'
+)
+
+head(sf_dams_1)
+```
+
+### 2.2. Magisterial district boundaries
+
+```{r Reading magisterial district boundaries (before apartheid), warning=FALSE}
+# For reading the data, we indicate the name of the folder where
+# the data is located and the name of the shape file
+sf_mag_boundaries_sa <- st_read("South_Africa_DIVA_GIS_State_L2_Admin_Boundaries.shp")
+```
+
+Note that it has 354 features, like the 354 magisterial boundaries used in the paper.
+
+### 3. Map replication
+
+```{r Map replication 1: same filtering as paper, warning=FALSE}
+ggplot() + 
+  geom_sf(data = sf_mag_boundaries_sa) +
+  geom_sf(data = sf_dams_1) +
+  labs(title = "Map of (filtered) Dams & Magisterial District Boundaries of South Africa") +
+  theme_minimal()+ 
+  theme(
+    axis.text = element_blank()
+  )
+```
+
+However, in the map above we see that the observations are reduced significantly when filtering for dam height, reservoir capacity
+and for dams that serve irrigation purposes. There are 2 reasons for that:
+1. The data used here contains a lot less observations than the data used in the paper.
+2. There are several missing values in the dam height column, which filters the dataset more than it probably would if we had a complete dataset.
+
+```{r Map replication 2: no filtering, warning=FALSE}
+ggplot() + 
+  geom_sf(data = sf_mag_boundaries_sa) +
+  geom_sf(data = sf_dams_2) +
+  labs(title = "Map of Dams & Magisterial District Boundaries of South Africa") +
+  theme_minimal()+
+  theme(
+    axis.text = element_blank()
+  )
+```
+
+# $\color{darkblue}{\text{Paper 2}}$
+
+*Code and explanation for Question 2 will go here.*
+
+```{r question2}
+# Placeholder for Question 2
+```
+
+# $\color{darkblue}{\text{Paper 3}}$
+
+*Code and explanation for Question 3 will go here.*
+
+```{r question3}
+# Placeholder for Question 3
+```
+
+# $\color{darkblue}{\text{Paper 4}}$
+
+Paper: "In harm's way? infrastructure investments and the persistence of coastal cities".
+
+Notes on the possible sources of data for figure 4 ("Road maps of Vietnam, 2000 and 2010"):
+- Replication package for paper 4: https://www.openicpsr.org/openicpsr/project/207641/version/V1/view. Useful information in:
+  - Raw data -> Boundaries (for constructing Vietnam's coastline as shown in the paper).
+  - The author says that they were constructed using Natural Earth Data and then cropping the shapefile to include only Vietnam's coastline.
+  - But their files don't include the boundaries of the whole Vietnam! So the replication package is not very useful.
+- Vietnam's country boundaries obtained from: https://gadm.org/download_country.html. Different shape files for different territorial administrative levels.
+- Vietnam's road network information (for 2015) obtained from: https://data.humdata.org/dataset/viet-nam-roads
+
+#### 1. Relevant information of the paper for replicating the map
+
+1. Maps to be replicated: road network of Vietnam in 2000 and 2010.
+2. Need map of Vietnam.
+3. Need road networks by road type (if they are available). On how the author constructed Vietnam's road network:
+  - "I obtain road network data from the 2000 and 2010 editions of ITMB Publishing's detailed International Travel Maps of Vietnam, which show the location of freeways, dual carriageways, major, minor and other roads. 
+  - I geo-referenced each map and manually traced the location of each road category to obtain a GIS shapefile of the entire road network in each road category in 2000 and 2010, shown in Figure 3."
+  
+#### 2. Importing and cleaning the data
+
+We need to read the data from 2 different sources: an Excel (for the dams) and a shape file (for the magisterial district boundaries).
+
+#### 2.1. Vietnam's boundaries
+
+```{r Reading Vietnams boundaries, warning=FALSE, message=FALSE}
+sf_vietnam <- st_read(
+  "gadm41_VNM_0.shp"
+)
+```
+  
+#### 2.2. Road network
+
+```{r Reading Vietnams road network, warning=FALSE, message=FALSE}
+sf_vietnam_roads <- st_read(
+  "vnm_rdsl_2015_0SM.shp"
+)
+```
+
+```{r Checking road types, warning=FALSE}
+str(sf_vietnam_roads)
+unique(sf_vietnam_roads$type)
+```
+
+The type of road is stored within the `type` column. Given that there are 28 unique types of roads (as they include crossings and linkks as separate types), below
+we simplify the classification by separating the types into either:
+1. "motorway" or "trunk" roads (assimilated to a "Dual carriageway" as used in the paper).
+2. "primary" road (that could be assimilated to the term "Freeway" as used in the paper).
+3. "secondary" roads (assimilated to "major" roads).
+4. "tertiary" roads (assimilated to "minor" roads).
+5. "other" roads. The other types of roads not included in the previous classifications.
+
+We can map this renaming into the simple features dataset:
+
+```{r Mapping road types of dataset to paper}
+road_type_mapping <- c(
+  "motorway" = "Dual carriageway/Freeway",
+  "motorway_link" = "Dual carriageway/Freeway",
+  "trunk" = "Dual carriageway/Freeway",
+  "trunk_link" = "Dual carriageway/Freeway",
+  "primary" = "Major road",
+  "primary_link" = "Major road",
+  "secondary" = "Minor road",
+  "secondary_link" = "Minor road",
+  "tertiary" = "Minor road",
+  "tertiary_link" = "Minor road",
+  # All others are mapped to "Other"
+  "footway" = "Other",
+  "residential" = "Other",
+  "pedestrian" = "Other",
+  "unclassified" = "Other",
+  "service" = "Other",
+  "track" = "Other",
+  "road" = "Other",
+  "living_street" = "Other",
+  "steps" = "Other",
+  "path" = "Other",
+  "construction" = "Other",
+  "cycleway" = "Other",
+  "proposed" = "Other",
+  "crossing" = "Other",
+  "services" = "Other",
+  "rest_area" = "Other",
+  "yes" = "Other"
+)
+
+sf_vietnam_roads <- sf_vietnam_roads %>%
+  mutate(mapped_type = recode(type, !!!road_type_mapping))
+
+unique(sf_vietnam_roads$mapped_type)
+```
+
+#### 3. Map replication
+
+```{r Map replication: Vietnams road network in 2015}
+ggplot() + 
+  geom_sf(data = sf_vietnam) +
+  geom_sf(data = sf_vietnam_roads, aes(color = mapped_type)) +
+  scale_color_manual(
+    name = "Road Types",
+    values = c(
+      "Dual carriageway/Freeway" = "#213921",
+      "Major road" = "#ff000074",
+      "Minor road" = "#ffa60075",
+      "Other" = "#e1e193"
+    )
+  ) +
+  labs(
+    title = "Map of Vietnam's road network in 2015"
+  ) +
+ theme_minimal() +
+   theme(
+    axis.text = element_blank()
+  )
+```
+
+# $\color{darkblue}{\text{Paper 5}}$
+
+Paper: "The Effects of Roads on Trade and Migration: Evidence from a Planned Capital City"
+The following analysis identifies radial and non-radial highways in Brazil, using Brasília as a central point. The roads are classified based on proximity to Brasília and visualized on a map.
+
+We use data from the Instituto Brasileiro de Geografia e Estatística (Brazilian Institute of Geography and Statistics), which is responsible for the official collection of statistical, geographic, cartographic, geodetic, and environmental information in Brazil. The road dataset represents the main structuring road axes of the Brazilian territory. Additionally, we use the world map data and filter it to include only Brazil.
+
+### Load Datasets
+
+``` {r load-data1, warning=FALSE, message=FALSE, results="hide"}
+# Load road dataset
+road <- st_read("eixo_rodoviario_estruturante_2014.shp") %>%
+  rename(
+    SegmentDescription = DescSeg,    
+    RoadType = TipoPNV,             
+    Code = CODIGO                    
+  )
+head(road)
+```
+
+
+```{r load-data3, warning=FALSE, message=FALSE}
+
+# We filter for Brazil from the world dataset
+brazil <- world %>%
+  filter(name_long == "Brazil")
+# We select the cities highlight on fig. 1 in the paper
+selected_cities <- c("Boa Vista", "Macapá", "Belém", "Manaus", "Porto Velho", 
+                     "Rio Branco", "Palmas", "Brasília", 
+                     "Cuiabá", "Campo Grande", 
+                     "São Paulo", "Rio de Janeiro", "Belo Horizonte", 
+                     "Florianópolis", "Porto Alegre", "Salvador", "Recife", 
+                     "Natal", "Fortaleza", "João Pessoa", 
+                     "Aracaju", "Maceió", "Goiânia", "Vitória")
+# we filter for the year 2000 as indicated in fig. 1 in the paper
+cities <- read_municipality(year = 2000) %>%
+  filter(name_muni %in% selected_cities)
+```
+
+We use Brasília as the center point as the paper states "The roads radiating out from Brasília are known as radial highways" (Morten & Oliveira, 2018). Moreover, we are making sure that the point representing Brasília is in the same CRS as the road dataset. This is important because as seen in class the spatial operations like calculating distances will only work correctly if both the point and the roads use the same CRS.
+
+```{r analysis, warning=FALSE, message=FALSE }
+# Brasília coordinates
+brasilia_coords <- cities %>%
+  filter(name_muni == "Brasília") %>%
+  st_coordinates()
+
+# Brasília as a point in the same CRS as the roads dataset
+brasilia_point <- st_sfc(
+  st_point(c(brasilia_coords[1, "X"], brasilia_coords[1, "Y"])), 
+  crs = st_crs(road)
+)
+
+# We classify roads as Radial or Non-Radial based on distance from Brasília. 
+# We use a threshold of 500 to try to get as close to the figure as possible. 
+road <- road %>%
+  mutate(
+    distance_km = as.numeric(st_distance(geometry, brasilia_point)) / 1000,
+    classification = ifelse(distance_km < 500, "Radial highways (2000)", 
+                            "Non−radial highways (2000)")  
+  )
+```
+
+### Visualization
+
+```{r visualization, fig.width=10, fig.height=7}
+ggplot() +
+  geom_sf(data = brazil, fill = NA, color = "grey") +  
+  geom_sf(data = cities, size = 3, color = "black") +  
+  geom_text_repel(data = cities, aes(label = name_muni, geometry = geom), 
+                  stat = "sf_coordinates", size = 2.5) +
+  geom_sf(data = road, aes(linetype = classification, color = classification), 
+          size = 0.5) +  
+  scale_linetype_manual(
+    values = c("Radial highways (2000)" = "solid", 
+               "Non−radial highways (2000)" = "dotted")
+  ) +
+  scale_color_manual(
+    values = c("Radial highways (2000)" = "black", 
+               "Non−radial highways (2000)" = "darkgrey")
+  ) +
+  theme_minimal() +  
+  theme(
+    axis.title = element_blank(), 
+    axis.text = element_blank(), 
+    legend.title = element_blank()
+  ) +
+  labs(
+    linetype = "Highway Type",  
+    color = "Highway Type",     
+    caption = "Figure 1: Map of straight-line instrument and radial highways"
+  )
+```
+Note: We didn’t add the Minimum Spanning Tree (MST) road network because the method in the paper seems complex. It involves slicing the map, and finding the shortest paths from Brasília to state capitals in each slice and then combining those paths.
+
+### References
+
+Mettetal, E., 2019. Irrigation dams, water and infant mortality: Evidence from South Africa (fig. 2: hydro dams in South Africa)
+
+Fried, S. and Lagakos, D., 2021. Rural electrification, migration and structural transformation: Evidence from Ethiopia (fig. 4: districts and electricity grid in Ethiopia)
+
+Pellegrina, H.S. and Sotelo, S., 2021. Migration, Specialization, and Trade: Evidence from Brazil's March to the West (fig. 2: Population in Brazil's meso-regions (or districts) in different periods
+
+Balboni, C.A., 2019. In harm's way? infrastructure investments and the persistence of coastal cities. Link here (fig. 3: Vietnam's road infrastructure by road type - if available)
+
+Morten, M. & Oliveira, J., 2018. The Effects of Roads on Trade and Migration: Evidence from a Planned Capital City (fig. 1: Brazil's capital and main road infrastructure)
+
+### Data Sources
+
+**Paper 1:** 
+
+Department of Water Affairs (Dam Safety Office):Department of Water Affairs. (2013). Dam Safety Office dataset. Retrieved from [http://www.dwaf.gov.za/DSO/Default.aspx](http://www.dwaf.gov.za/DSO/Default.aspx)
+   
+Global Administrative Boundaries (Magisterial Districts): Global Administrative Boundaries. Magisterial district boundaries (pre-1996). Retrieved from [https://hub.arcgis.com/datasets/nga::land-ownership/about?layer=34](https://hub.arcgis.com/datasets/nga::land-ownership/about?layer=34)
+
+AQUASTAT (FAO): Food and Agriculture Organization of the United Nations (FAO). (2025). AQUASTAT dams database. Retrieved from [https://www.fao.org/aquastat/en/databases/dams/](https://www.fao.org/aquastat/en/databases/dams/)
+
+**Paper 2:** 
+
+**Paper 3:** 
+
+**Paper 4:** 
+
+Replication Package for Paper 4: Balboni, C.A. Retrieved from [https://www.openicpsr.org/openicpsr/project/207641/version/V1/view](https://www.openicpsr.org/openicpsr/project/207641/version/V1/view)
+
+Natural Earth Data (for Vietnam’s coastline):Natural Earth. Retrieved from [https://www.naturalearthdata.com](https://www.naturalearthdata.com)
+
+Vietnam’s Country Boundaries: GADM. Retrieved from [https://gadm.org/download_country.html](https://gadm.org/download_country.html)
+
+Vietnam’s Road Network (2015): United Nations Office for the Coordination of Humanitarian Affairs. (2015). Retrieved from [https://data.humdata.org/dataset/viet-nam-roads](https://data.humdata.org/dataset/viet-nam-roads)
+
+**Paper 5:** 
+
+Instituto Brasileiro de Geografia e Estatística. (2019). Transportation logistics. Retrieved from https://www.ibge.gov.br/en/geosciences/maps/brazil-geographic-networks-mapasdobrasil/18884-transportation-logistics.html
